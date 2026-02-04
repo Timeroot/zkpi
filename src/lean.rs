@@ -9,7 +9,8 @@ use nom::{
     IResult,
 };
 use nom_unicode::complete::alphanumeric1;
-use rug::{Assign, Complete, Integer};
+use num_bigint::BigUint;
+use num_traits::{Num, Zero};
 
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,8 +21,8 @@ fn parse_usize(input: &str) -> IResult<&str, usize> {
     map_res(digit1, str::parse)(input)
 }
 
-fn parse_bigint(input: &str) -> IResult<&str, Integer> {
-    map_res(digit1, |s: &str| Integer::parse(s).map(|x| x.complete()))(input)
+fn parse_bigint(input: &str) -> IResult<&str, BigUint> {
+    map_res(digit1, |s: &str| BigUint::from_str_radix(s, 10))(input)
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -153,7 +154,7 @@ enum Expression {
     },
 
     ELN {
-        value: Integer,
+        value: BigUint,
     },
 
     ELS {
@@ -740,16 +741,16 @@ impl LeanEncoding {
             }
             Expression::ELN { value } => {
                 let mut value = value.clone();
-                if value > 10_000 {
+                if value > BigUint::from(10_000u32) {
                     axioms.insert(format!("nat_{}", value), term::ind("Nat.{}"));
                     return Ok(term::axiom(format!("nat_{}", value)));
-                    //return Err(format!("Gigantic NAT...failing fast: {}", value));
                 }
+
                 // For now...we convert to normal Nat...
                 let mut res = term::ind_ctor("Nat.{}", "zero");
                 while !value.is_zero() {
                     res = term::app(term::ind_ctor("Nat.{}", "succ"), res);
-                    value -= 1;
+                    value -= 1u32;
                 }
                 res
             }

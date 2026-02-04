@@ -3,6 +3,7 @@
 #![recursion_limit = "100000000000"]
 #![allow(warnings)]
 
+#[cfg(unix)]
 use rlimit::{setrlimit, Resource, INFINITY};
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap};
@@ -58,7 +59,8 @@ fn main() -> io::Result<()> {
     let options = Options::from_args();
     let path_buf = options.path.clone();
 
-    let res = setrlimit(Resource::STACK, INFINITY, INFINITY);
+    #[cfg(unix)]
+    let _ = setrlimit(Resource::STACK, INFINITY, INFINITY);
     //println!("got: {:?}", res);
     //panic!("");
     //
