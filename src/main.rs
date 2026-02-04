@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 use std::path::PathBuf;
+use std::{borrow::Cow, iter};
 
 use structopt::clap::arg_enum;
 use structopt::StructOpt;
@@ -66,8 +67,32 @@ fn main() -> io::Result<()> {
     //
     let mut file = File::open(options.path)?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf);
-    let mut encoding = lean::LeanEncoding::parse(std::str::from_utf8(&buf).unwrap()).unwrap();
+    file.read_to_end(&mut buf)?;
+
+    // The Lean export format is textual. On Windows, PowerShell redirection can accidentally
+    // produce UTF-16LE output; accept UTF-8 or UTF-16 (with BOM) to avoid confusing panics.
+    let text: Cow<'_, str> = match std::str::from_utf8(&buf) {
+        Ok(s) => Cow::Borrowed(s),
+        Err(utf8_err) => {
+            let decoded = decode_utf16_with_bom(&buf).map_err(|utf16_err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Failed to decode export file as UTF-8 ({}), and also failed UTF-16 decode ({}).",
+                        utf8_err, utf16_err
+                    ),
+                )
+            })?;
+            Cow::Owned(decoded)
+        }
+    };
+
+    let mut encoding = lean::LeanEncoding::parse(&text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to parse Lean export file: {e}"),
+        )
+    })?;
 
     let names = encoding.theorem_names();
     let mut size_cache = Some(hashconsing::hash_coll::HConMap::default());
@@ -288,4 +313,28 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn decode_utf16_with_bom(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() < 2 {
+        return Err("file too small".to_string());
+    }
+
+    let (le, start) = match (bytes[0], bytes[1]) {
+        (0xFF, 0xFE) => (true, 2),  // UTF-16LE BOM
+        (0xFE, 0xFF) => (false, 2), // UTF-16BE BOM
+        _ => return Err("missing UTF-16 BOM".to_string()),
+    };
+
+    let body = &bytes[start..];
+    if body.len() % 2 != 0 {
+        return Err("UTF-16 byte length is not even".to_string());
+    }
+
+    let u16s = body
+        .chunks_exact(2)
+        .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+        .collect::<Vec<_>>();
+
+    String::from_utf16(&u16s).map_err(|_| "invalid UTF-16 data".to_string())
 }
