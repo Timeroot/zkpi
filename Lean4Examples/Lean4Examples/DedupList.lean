@@ -1,7 +1,7 @@
 noncomputable def add_eff : Nat → Nat → Nat :=
   λ n m => @Nat.rec (λ _ => Nat) n (λ mp prev => Nat.succ prev) m
 
-noncomputable def sub_eff : Nat → Nat → Nat := 
+noncomputable def sub_eff : Nat → Nat → Nat :=
   λ n m => @Nat.rec (λ _ => Nat) n (λ mp prev => @Nat.rec (λ _=> Nat) Nat.zero (λ pprev _ => pprev) prev) m
 
 noncomputable def is_zero : Nat -> Bool :=
@@ -56,7 +56,7 @@ def subset : List Nat -> List Nat -> Prop :=
 def subset_nil : ∀ (l : List Nat), subset [] l :=
   λ l => trivial
 
-def subset_cons : ∀ (s l : List Nat) (hd : Nat) (p : mem hd l = Bool.true) (h: subset s l), subset (hd :: s) l := 
+def subset_cons : ∀ (s l : List Nat) (hd : Nat) (p : mem hd l = Bool.true) (h: subset s l), subset (hd :: s) l :=
   λ s l hd p h => And.intro p h
 
 def subset_cons_list : ∀ (s l : List Nat) (hd : Nat), subset s l → subset s (hd :: l) :=
@@ -85,7 +85,11 @@ def nodup_nil : nodup [] := by trivial
 def nodup_cons (hd : Nat) (tl : List Nat) (p: mem hd tl = Bool.false) (prior: nodup tl) : nodup (hd :: tl) :=
   And.intro p prior
 
-structure deduped_list (ol : List Nat) := (l : List Nat) (p : nodup l) (sub : subset l ol) (sub2: subset ol l)
+structure deduped_list (ol : List Nat) where
+  l : List Nat
+  p : nodup l
+  sub : subset l ol
+  sub2: subset ol l
 
 def deduped_nil : deduped_list [] := ⟨ [], nodup_nil, subset_nil [], subset_nil [] ⟩
 
@@ -107,7 +111,7 @@ by
 
 noncomputable def deduped_cons (hd : Nat) (tl : List Nat) (prev: deduped_list tl) : deduped_list (hd :: tl) :=
   Decidable.recOn (decidable_bool_eq (mem hd prev.l))
-    (λ np => deduped_list.mk prev.l prev.p (subset_cons_list prev.l tl hd prev.sub) (subset_cons tl prev.l hd (not_eq_ff_eq_Bool.true np) prev.sub2)) 
+    (λ np => deduped_list.mk prev.l prev.p (subset_cons_list prev.l tl hd prev.sub) (subset_cons tl prev.l hd (not_eq_ff_eq_Bool.true np) prev.sub2))
     (λ p => deduped_list.mk (hd :: prev.l) (nodup_cons hd prev.l p prev.p) (subset_cons_cons prev.l tl hd prev.sub) (subset_cons_cons tl prev.l hd prev.sub2))
 
 noncomputable def dedup_list : ∀ (l : List Nat), deduped_list l :=

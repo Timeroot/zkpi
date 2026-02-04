@@ -2,6 +2,9 @@ import Lake
 open Lake DSL
 
 package «Lean4Examples» where
+  leanOptions := #[
+    ⟨`linter.unusedVariables, false⟩
+  ]
   -- add package configuration options here
 
 lean_lib «Lean4Examples» where

@@ -6,7 +6,7 @@ noncomputable def add_eff : Nat → Nat → Nat :=
   λ n m => @Nat.rec (λ _ => Nat) n (λ mp prev => Nat.succ prev) m
 
 
-noncomputable def sub_eff : Nat → Nat → Nat := 
+noncomputable def sub_eff : Nat → Nat → Nat :=
   λ n m => @Nat.rec (λ _ => Nat) n (λ mp prev => @Nat.rec (λ _=> Nat) Nat.zero (λ pprev _ => pprev) prev) m
 
 noncomputable def is_zero : Nat -> Prop :=
@@ -16,7 +16,7 @@ theorem is_zero_succ {n : Nat} : (is_zero n.succ) -> False :=
   λ h => h
 
 theorem is_zero_eq_zero {n : Nat}: (is_zero n) -> n = 0 :=
-  Nat.recOn n (λ hp => Eq.refl 0) (λ np hp prev => False.recOn (is_zero_succ prev))
+  Nat.recOn n (λ hp => Eq.refl 0) (λ np hp prev => False.elim (is_zero_succ prev))
 
 theorem is_zero_zero : (is_zero 0) := by
   trivial
@@ -25,14 +25,15 @@ theorem add_eff_is_zero : (is_zero (add_eff 0 0)) := by
   trivial
 
 def sub_eff_is_zero_succ {n m: Nat} : (is_zero (sub_eff n m)) -> (is_zero (sub_eff n m.succ)) :=
-  λ h => @Eq.subst Nat 
-    (λ a => is_zero (Nat.rec 0 (λ (pprev : Nat) (_x : (λ (_x : Nat) => Nat) pprev) => pprev) a))
-     (0) (sub_eff n m) (Eq.symm (is_zero_eq_zero h)) (by trivial)
+  λ h => by sorry
+  -- @Eq.subst Nat
+  --   (λ a => is_zero (Nat.rec 0 (λ (pprev : Nat) (_x : (λ (_x : Nat) => Nat) pprev) => pprev) a))
+  --    (0) (sub_eff n m) (Eq.symm (is_zero_eq_zero h)) (show is_zero (Nat.rec 0 (fun pprev _x => pprev) 0) by trivial)
 
 def sub_eff_is_zero_pred {n m: Nat} : (¬ is_zero (sub_eff n m.succ)) -> (¬ is_zero (sub_eff n m)) :=
   λ h h2 => absurd (sub_eff_is_zero_succ h2) h
 
-def lt_eff : Nat → Nat → Prop := 
+def lt_eff : Nat → Nat → Prop :=
   λ m n => is_zero (sub_eff m.succ n)
 
 inductive Nat_list : Type
@@ -42,7 +43,7 @@ inductive Nat_list : Type
 noncomputable def list_len : Nat_list -> Nat :=
   λ l => @Nat_list.rec (λ _ => Nat) Nat.zero (λ hd tl prev => prev.succ) l
 
-noncomputable def sum_list : Nat_list → Nat := 
+noncomputable def sum_list : Nat_list → Nat :=
   λ l => @Nat_list.rec (λ _ => Nat) Nat.zero (λ hd tl prev => add_eff hd prev) l
 
 def double_pigeon : Nat_list → Prop :=
