@@ -2426,11 +2426,18 @@ impl Exporter {
         let mut eval = Evaluator::new(&theorem.axioms, theorem.inductives.clone());
         let mut axioms = theorem.axioms;
 
-        let simplified_ty = eval.eval(theorem.ty.clone()).unwrap();
+        // Simplifying the expected type can introduce definitional-equality
+        // obligations that the ZK unifier doesn't always handle (e.g. `id` vs `fun x => x`,
+        // `Nat.rec ... 0` vs base case). Default to using the original type.
+        // Set `ZKPI_SIMPLIFY_TYPE=1` to restore the old behavior.
+        let simplified_ty = if std::env::var("ZKPI_SIMPLIFY_TYPE").ok().as_deref() == Some("1") {
+            eval.eval(theorem.ty.clone()).unwrap()
+        } else {
+            theorem.ty.clone()
+        };
         let mut exporter = Exporter::with_axioms(simplified_ty, axioms, eval.inductives.clone());
 
         let simplified_val = eval.eval(theorem.val.clone()).unwrap();
-        let simplified_ty = eval.eval(theorem.ty.clone()).unwrap();
         let rule = exporter.export_ty_term(simplified_val).unwrap();
         let result_type = exporter.get_zk_rule(rule).result_term_idx;
 
@@ -2460,7 +2467,12 @@ impl Exporter {
         let mut eval = Evaluator::new(&theorem.axioms, theorem.inductives.clone());
         let mut axioms = theorem.axioms;
 
-        let simplified_ty = eval.eval(theorem.ty.clone()).unwrap();
+        // See note in `simulate`: default to leaving the expected type unsimplified.
+        let simplified_ty = if std::env::var("ZKPI_SIMPLIFY_TYPE").ok().as_deref() == Some("1") {
+            eval.eval(theorem.ty.clone()).unwrap()
+        } else {
+            theorem.ty.clone()
+        };
         let mut exporter =
             Exporter::with_axioms(simplified_ty.clone(), axioms, eval.inductives.clone());
 
@@ -3027,6 +3039,65 @@ impl Exporter {
         context: &mut HashMap<usize, usize>,
         max_binding: usize,
     ) -> Result<usize, String> {
+        // Recursor normalization: many Lean4 terms are definitionally equal only after reducing
+        // recursor-headed expressions (e.g. `Nat.rec ... Nat.zero` reduces to base case).
+        // If either side is headed by an inductive recursor, try to simplify it before unifying.
+        let res_head = self
+            .get_zk_term(self.get_zk_term(result_type).top_level_func)
+            .clone();
+        if res_head.kind == EXPR_IND_REC {
+            if let Ok(eval_rule) = self.try_unify_recs(result_type, zk_context, context, max_binding)
+            {
+                let simplified = self.get_zk_rule(eval_rule).result_term_idx;
+                if simplified != result_type {
+                    let unify_rule = self.export_unify_helper(
+                        simplified,
+                        expected_type,
+                        zk_context,
+                        context,
+                        max_binding,
+                    )?;
+                    let trans = ExpRule::eval_transitive(
+                        result_type,
+                        expected_type,
+                        zk_context,
+                        max_binding,
+                        eval_rule,
+                        unify_rule,
+                    );
+                    return Ok(self.add_zk_rule(trans));
+                }
+            }
+        }
+
+        let exp_head = self
+            .get_zk_term(self.get_zk_term(expected_type).top_level_func)
+            .clone();
+        if exp_head.kind == EXPR_IND_REC {
+            if let Ok(eval_rule) = self.try_unify_recs(expected_type, zk_context, context, max_binding)
+            {
+                let simplified = self.get_zk_rule(eval_rule).result_term_idx;
+                if simplified != expected_type {
+                    let unify_rule = self.export_unify_helper(
+                        result_type,
+                        simplified,
+                        zk_context,
+                        context,
+                        max_binding,
+                    )?;
+                    let trans = ExpRule::eval_transitive(
+                        result_type,
+                        expected_type,
+                        zk_context,
+                        max_binding,
+                        unify_rule,
+                        eval_rule,
+                    );
+                    return Ok(self.add_zk_rule(trans));
+                }
+            }
+        }
+
         // TODO: carry around a typing context... this will be better...
         // TODO: can we perform eval with the expected type already known?
         //        could be much better...
@@ -3119,6 +3190,46 @@ impl Exporter {
                     domain_rule,
                     HashList::EMPTY,
                     body_rule,
+                    HashList::EMPTY,
+                    max_binding,
+                )
+            }
+            (EXPR_PROJ, EXPR_PROJ) => {
+                if result.index != expected.index {
+                    return Err(format!(
+                        "Unification failed: projection index mismatch ({} vs {}).\n- result_term={}\n- expected_term={}",
+                        result.index,
+                        expected.index,
+                        term_to_string(
+                            result_type,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                        term_to_string(
+                            expected_type,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                    ));
+                }
+
+                let res_e = result.left;
+                let exp_e = expected.left;
+                let parent0 = if res_e != exp_e {
+                    self.export_unify_helper(res_e, exp_e, zk_context, context, max_binding)?
+                } else {
+                    let r = ExpRule::eval_id(res_e, zk_context, max_binding);
+                    self.add_zk_rule(r)
+                };
+
+                // Congruence: if `e ≡ e'` then `Proj i e ≡ Proj i e'`.
+                ExpRule::eval_proj_simpl(
+                    result_type,
+                    expected_type,
+                    zk_context,
+                    parent0,
                     HashList::EMPTY,
                     max_binding,
                 )
@@ -3216,6 +3327,58 @@ impl Exporter {
                 }
             }
             _ => {
+                // Last-chance definitional equality: try evaluating either side and unify again.
+                // This is intentionally broader than the recursor-only normalization at the top,
+                // because some definitional equalities only appear after evaluation.
+                let eval_res_rule =
+                    self.export_eval(result_type, HashList::EMPTY, &mut HashMap::new(), max_binding);
+                let eval_res_term = self.get_zk_rule(eval_res_rule).result_term_idx;
+                if eval_res_term != result_type {
+                    let unify_rule = self.export_unify_helper(
+                        eval_res_term,
+                        expected_type,
+                        zk_context,
+                        context,
+                        max_binding,
+                    )?;
+                    let unify_rule_s = self.get_zk_rule(unify_rule).clone();
+                    let trans = ExpRule::eval_transitive(
+                        result_type,
+                        unify_rule_s.result_term_idx,
+                        zk_context,
+                        max_binding,
+                        eval_res_rule,
+                        unify_rule,
+                    );
+                    return Ok(self.add_zk_rule(trans));
+                }
+
+                let eval_exp_rule = self.export_eval(
+                    expected_type,
+                    HashList::EMPTY,
+                    &mut HashMap::new(),
+                    max_binding,
+                );
+                let eval_exp_term = self.get_zk_rule(eval_exp_rule).result_term_idx;
+                if eval_exp_term != expected_type {
+                    let unify_rule = self.export_unify_helper(
+                        result_type,
+                        eval_exp_term,
+                        zk_context,
+                        context,
+                        max_binding,
+                    )?;
+                    let trans = ExpRule::eval_transitive(
+                        result_type,
+                        expected_type,
+                        zk_context,
+                        max_binding,
+                        unify_rule,
+                        eval_exp_rule,
+                    );
+                    return Ok(self.add_zk_rule(trans));
+                }
+
                 // attempt proof_irrel unification
                 let res_ty_rule = self.export_ty(result_type, zk_context, context, max_binding)?;
                 let exp_ty_rule =
@@ -3225,8 +3388,11 @@ impl Exporter {
 
                 let ty_ty_rule = self.export_ty(res_ty_idx, zk_context, context, max_binding)?;
                 let ty_ty_idx = self.get_zk_rule(ty_ty_rule).result_term_idx;
-                let ty_ty_term = self.get_zk_term(ty_ty_idx);
+                let ty_ty_term = self.get_zk_term(ty_ty_idx).clone();
 
+                // `res_ty_idx` / `exp_ty_idx` are the *types of the two terms*.
+                // Proof irrelevance is applicable when these are propositions, i.e. their type is `Prop`.
+                // In Lean: if `p : P` and `P : Prop`, then `type_of(P) = Prop = Sort(0)`.
                 if res_ty_idx == exp_ty_idx && ty_ty_term.kind == EXPR_SORT && ty_ty_term.name == 0
                 {
                     let sub1 = ExpRule::proof_irrel_sub1(
@@ -3248,6 +3414,61 @@ impl Exporter {
                         sub1_idx,
                     )
                 } else {
+                    // More robust proof irrelevance:
+                    // If both terms are proofs (their types are propositions), but those proposition
+                    // types are only definitionally equal (not syntactically), first unify the
+                    // proposition types, then apply proof irrelevance.
+                    //
+                    // This handles cases like `id` vs `fun x => x`, `Nat.rec ... 0` vs base case, etc.
+
+                    // Check that both claims are propositions (i.e. have type Prop = Sort 0).
+                    let exp_ty_ty_rule = self.export_ty(exp_ty_idx, zk_context, context, max_binding)?;
+                    let exp_ty_ty_idx = self.get_zk_rule(exp_ty_ty_rule).result_term_idx;
+                    let exp_ty_ty_term = self.get_zk_term(exp_ty_ty_idx).clone();
+
+                    if ty_ty_term.kind == EXPR_SORT
+                        && ty_ty_term.name == 0
+                        && exp_ty_ty_term.kind == EXPR_SORT
+                        && exp_ty_ty_term.name == 0
+                    {
+                        // Unify the proposition types (definitional equality) and cast the result proof.
+                        let prop_unify = self.export_unify_helper(
+                            res_ty_idx,
+                            exp_ty_idx,
+                            zk_context,
+                            context,
+                            max_binding,
+                        )?;
+
+                        let conv_rule = ExpRule::eval_ty(
+                            result_type,
+                            exp_ty_idx,
+                            zk_context,
+                            max_binding,
+                            res_ty_rule,
+                            prop_unify,
+                        );
+                        let conv_rule_idx = self.add_zk_rule(conv_rule);
+
+                        let sub1 = ExpRule::proof_irrel_sub1(
+                            expected_type,
+                            exp_ty_ty_idx,
+                            zk_context,
+                            max_binding,
+                            exp_ty_rule,
+                            exp_ty_ty_rule,
+                            exp_ty_idx,
+                        );
+                        let sub1_idx = self.add_zk_rule(sub1);
+                        ExpRule::proof_irrel(
+                            result_type,
+                            expected_type,
+                            zk_context,
+                            max_binding,
+                            conv_rule_idx,
+                            sub1_idx,
+                        )
+                    } else {
                     //ExpRule::proof_irrel(
                     //    result_type,
                     //    expected_type,
@@ -3258,7 +3479,47 @@ impl Exporter {
                     //)
                     //'
 
-                    return Err("oof".to_string());
+                    return Err(format!(
+                        "Unification failed ({} vs {}) and proof-irrelevance did not apply.\n\
+                         - result_term={}\n\
+                         - expected_term={}\n\
+                         - result_term_ty={}\n\
+                         - expected_term_ty={}\n\
+                         - type_of(result_term_ty)={}",
+                        kind_to_string(result.kind),
+                        kind_to_string(expected.kind),
+                        term_to_string(
+                            result_type,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                        term_to_string(
+                            expected_type,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                        term_to_string(
+                            res_ty_idx,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                        term_to_string(
+                            exp_ty_idx,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                        term_to_string(
+                            ty_ty_idx,
+                            &self.zk_input.terms,
+                            &self.axiom_rev_mapping,
+                            &self.ind_rev_map
+                        ),
+                    ));
+                    }
                 }
             }
         };
@@ -3468,7 +3729,8 @@ impl Exporter {
                     let zk_result = ExpTerm::app(f_result, e_result, f_term.top_level_func, self);
                     let result_idx = self.add_zk_term(zk_result);
 
-                    ExpRule::eval_app(
+                    // Base evaluation step: evaluate function and argument.
+                    let base_rule = ExpRule::eval_app(
                         input_idx,
                         result_idx,
                         zk_context,
@@ -3477,7 +3739,31 @@ impl Exporter {
                         e_rule,
                         e_quot,
                         max_binding,
-                    )
+                    );
+                    let base_rule_idx = self.add_zk_rule(base_rule);
+
+                    // Extra step: try to reduce recursor-headed applications after evaluation.
+                    // This helps `Nat.rec ...` / `Fin` / typeclass-generated code where the head
+                    // stays stuck unless we apply recursor simplification.
+                    if let Ok(rec_rule_idx) =
+                        self.try_unify_recs(result_idx, zk_context, context, max_binding)
+                    {
+                        let rec_rule = self.get_zk_rule(rec_rule_idx).clone();
+                        if rec_rule.result_term_idx != result_idx {
+                            ExpRule::eval_transitive(
+                                input_idx,
+                                rec_rule.result_term_idx,
+                                zk_context,
+                                max_binding,
+                                base_rule_idx,
+                                rec_rule_idx,
+                            )
+                        } else {
+                            return base_rule_idx;
+                        }
+                    } else {
+                        return base_rule_idx;
+                    }
                 }
             }
             EXPR_PI | EXPR_LAM => {
@@ -3646,27 +3932,76 @@ impl Exporter {
 
                 // this probably means we need to resolve a rec.....................
                 // ultimate sadness
+                let mut pi_simplify_steps = 0usize;
                 while f_ty.kind != EXPR_PI {
-                    // try to evaluate the recursors fully
-                    // Just do domain for now
-                    let rule_idx = self.try_unify_recs(
+                    if pi_simplify_steps > 8 {
+                        return Err(format!(
+                            "Failed to reduce function type to Pi after {} steps. kind={} ty={}",
+                            pi_simplify_steps,
+                            kind_to_string(f_ty.kind),
+                            term_to_string(
+                                f_result,
+                                &self.zk_input.terms,
+                                &self.axiom_rev_mapping,
+                                &self.ind_rev_map
+                            )
+                        ));
+                    }
+                    pi_simplify_steps += 1;
+
+                    // First try to simplify recursor-headed types.
+                    if let Ok(rule_idx) = self.try_unify_recs(
                         f_result,
                         HashList::EMPTY,
                         &mut HashMap::new(),
                         max_binding,
-                    );
-                    let new_result = self.get_zk_rule(rule_idx.clone().unwrap()).result_term_idx;
+                    ) {
+                        let new_result = self.get_zk_rule(rule_idx).result_term_idx;
+                        if new_result == f_result {
+                            // No progress; fall back to general evaluation below.
+                        } else {
+                            let f_rule_new = ExpRule::eval_ty(
+                                f,
+                                new_result,
+                                f_subs,
+                                max_binding,
+                                f_rule,
+                                rule_idx,
+                            );
+                            f_rule = self.add_zk_rule(f_rule_new);
+                            f_result = new_result;
+                            f_ty = self.get_zk_term(new_result).clone();
+                            continue;
+                        }
+                    }
+
+                    // Fall back to general evaluation.
+                    let eval_f_ty =
+                        self.export_eval(f_result, HashList::EMPTY, &mut HashMap::new(), max_binding);
+                    let eval_f_ty_rule = self.get_zk_rule(eval_f_ty).clone();
+                    if eval_f_ty_rule.result_term_idx == f_result {
+                        return Err(format!(
+                            "Failed to reduce function type to Pi. kind={} ty={}",
+                            kind_to_string(f_ty.kind),
+                            term_to_string(
+                                f_result,
+                                &self.zk_input.terms,
+                                &self.axiom_rev_mapping,
+                                &self.ind_rev_map
+                            )
+                        ));
+                    }
                     let f_rule_new = ExpRule::eval_ty(
                         f,
-                        new_result,
-                        zk_context,
+                        eval_f_ty_rule.result_term_idx,
+                        f_subs,
                         max_binding,
                         f_rule,
-                        rule_idx.clone().unwrap(),
+                        eval_f_ty,
                     );
                     f_rule = self.add_zk_rule(f_rule_new);
-                    f_result = new_result;
-                    f_ty = self.get_zk_term(new_result).clone()
+                    f_result = eval_f_ty_rule.result_term_idx;
+                    f_ty = self.get_zk_term(f_result).clone();
                 }
 
                 // try to evaluate the func type
@@ -4235,15 +4570,59 @@ impl Exporter {
         max_binding: usize,
     ) -> usize {
         let (subs, quot) = self.split_zk_context(zk_context, input_idx, context);
-        let parent0 = self
+        let mut parent0 = self
             .export_ty(input_idx, subs, context, max_binding)
             .unwrap();
+
+        // Projection typing needs the projected expression's type to be headed by an inductive.
+        // In Lean4-generated terms, the type can be headed by a recursor until reduced.
+        // Try to simplify recursors in the type before failing.
+        let mut type_idx = self.get_zk_rule(parent0).result_term_idx;
+        for _ in 0..4 {
+            let head = self.get_zk_term(self.get_zk_term(type_idx).top_level_func).clone();
+            if head.kind == EXPR_IND {
+                break;
+            }
+            if head.kind == EXPR_IND_REC {
+                if let Ok(rec_unify_rule) =
+                    self.try_unify_recs(type_idx, HashList::EMPTY, &mut HashMap::new(), max_binding)
+                {
+                    let new_type_idx = self.get_zk_rule(rec_unify_rule).result_term_idx;
+                    if new_type_idx == type_idx {
+                        break;
+                    }
+                    let ty_rule = ExpRule::eval_ty(
+                        input_idx,
+                        new_type_idx,
+                        subs,
+                        max_binding,
+                        parent0,
+                        rec_unify_rule,
+                    );
+                    parent0 = self.add_zk_rule(ty_rule);
+                    type_idx = new_type_idx;
+                    continue;
+                }
+            }
+            break;
+        }
+
         let parent0_rule = self.get_zk_rule(parent0);
         let parent0_result = self.get_zk_term(parent0_rule.result_term_idx);
-
         let parent0_tlf = self.get_zk_term(parent0_result.top_level_func);
-        assert!(parent0_tlf.kind == EXPR_IND, "GOT: {}", parent0_tlf.kind);
-        assert!(parent0_tlf.kind == EXPR_IND);
+        if parent0_tlf.kind != EXPR_IND {
+            panic!(
+                "export_constr_proj: expected projected expression type to be headed by IND, got {} ({}). type={}",
+                parent0_tlf.kind,
+                kind_to_string(parent0_tlf.kind),
+                term_to_string(
+                    parent0_rule.result_term_idx,
+                    &self.zk_input.terms,
+                    &self.axiom_rev_mapping,
+                    &self.ind_rev_map
+                )
+            );
+        }
         let inductive = parent0_tlf.ind;
         let parent1 = self.export_walk_proj(parent0_rule.result_term_idx, inductive, max_binding);
         let parent1_rule = self.get_zk_rule(parent1);
