@@ -85,9 +85,14 @@ Write-Host ""
 Write-Host "=== Summary ==="
 $results | Format-Table -AutoSize | Out-String | Write-Host
 
-$failCount = ($results | Where-Object { $_.Zkpi -eq "FAIL" }).Count
+$failures = @(
+  $results | Where-Object { ("" + $_.Zkpi).Trim().ToUpperInvariant() -eq "FAIL" }
+)
+$failCount = $failures.Count
 if ($failCount -gt 0) {
-  throw ("{0} test(s) failed in zkpi export." -f $failCount)
+  Write-Host ""
+  Write-Host ("{0} test(s) failed in zkpi export." -f $failCount)
+  exit 1
 }
 
 Write-Host "All tests passed."
