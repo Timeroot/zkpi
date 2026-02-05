@@ -332,7 +332,7 @@ theorem subset_sort (l : List Nat) :  subset (l) (sort l)  :=
 theorem sort_subset (l : List Nat) : subset (sort l) (l) :=
       (List.recOn l (trivial) (λ hd tl ih => insert_sorted_subset hd (sort tl) tl ih))
 
-theorem sort_correct (l : List Nat) : sorted (sort l) ∧ subset (l) (sort l) ∧ subset (sort l) (l) :=
+theorem testThm (l : List Nat) : sorted (sort l) ∧ subset (l) (sort l) ∧ subset (sort l) (l) :=
   And.intro (sort_sorted l) (And.intro (subset_sort l) (sort_subset l))
 
 end InsertionSort

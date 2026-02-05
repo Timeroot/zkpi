@@ -1,5 +1,3 @@
-import Init.Prelude
-
 noncomputable def add_eff : Nat → Nat → Nat :=
   λ n m => @Nat.rec (λ _ => Nat) n (λ mp prev => Nat.succ prev) m
 

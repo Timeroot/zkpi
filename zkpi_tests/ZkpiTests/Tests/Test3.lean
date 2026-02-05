@@ -1,5 +1,3 @@
-import Init.Prelude
-
 axiom f : Unit → Unit
 axiom myAx4 : f = (fun x ↦ x)
 

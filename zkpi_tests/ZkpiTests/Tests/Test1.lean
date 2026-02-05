@@ -1,5 +1,3 @@
-import Init.Prelude
-
 axiom MatMul (w : Type) : w → w
 
 axiom myAx4 : ∀ (w : Type), MatMul w = id

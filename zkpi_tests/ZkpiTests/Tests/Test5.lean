@@ -1,5 +1,3 @@
-import Init.Prelude
-
 axiom Fin.sum {α : Type u} {n : Nat} [Add α] (x : Fin n → α) : α
 
 noncomputable def MatMul {w} : (Fin w → Nat) → (Fin w → Nat) :=
