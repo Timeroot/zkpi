@@ -34,7 +34,9 @@ $tests = @(
   "ZkpiTests.Tests.Test7",
   "ZkpiTests.Tests.Test8",
   "ZkpiTests.Tests.Test9",
-  "ZkpiTests.Tests.Test10"
+  "ZkpiTests.Tests.Test10",
+  "ZkpiTests.Tests.AndComm",
+  "ZkpiTests.Tests.DedupList"
 )
 
 Push-Location $testsDir
