@@ -8,6 +8,9 @@ MathlibTests
 
 mathlib.out
 
+*.zk
 */**/*.pin
 zok/meta.zok
 .aider*
+zkpi_tests/out/*
+zkpi_tests/.lake/*
